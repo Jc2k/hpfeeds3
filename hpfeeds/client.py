@@ -86,18 +86,15 @@ class Client(object):
             while True:
                 try:
                     return self.connect()
+                except FeedException as e:
+                    logger.error('{}'.format(e))
+                except Disconnect as e:
+                    logger.warn('Disconnect while connecting.')
                 except socket.error as e:
                     logger.warn(
                         'Socket error while connecting',
                         exc_info=e,
                     )
-                except FeedException as e:
-                    logger.warn(
-                        'FeedException while connecting',
-                        exc_info=e,
-                    )
-                except Disconnect as e:
-                    logger.warn('Disconnect while connecting.')
 
                 time.sleep(self.sleepwait)
 
@@ -121,6 +118,10 @@ class Client(object):
                 self.s = self.makesocket(addr_family)
                 self.s.settimeout(self.timeout)
                 self.s.connect((addr, self.port))
+            except ssl.SSLError as e:
+                if e.reason == 'CERTIFICATE_VERIFY_FAILED':
+                    logger.error("Error validating certificate: {e}".format(e=e))
+                    continue
             except Exception:
                 logger.exception('Could not connect to broker {}[{}]'.format(
                     self.host,
@@ -138,6 +139,14 @@ class Client(object):
 
         self.unpacker.reset()
 
+        self.do_auth()
+
+        self.s.settimeout(None)
+        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        if sys.platform.startswith('linux'):
+            self.s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, 10)
+
+    def do_auth(self):
         try:
             d = self.s.recv(BUFSIZ)
         except socket.timeout:
@@ -158,11 +167,6 @@ class Client(object):
                 raise FeedException('Expected OP_INFO but got another opcode.')
         else:
             raise FeedException('Expected OP_INFO but cannot assemble complete message')
-
-        self.s.settimeout(None)
-        self.s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-        if sys.platform.startswith('linux'):
-            self.s.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, 10)
 
     def run(self, message_callback, error_callback):
         while not self.stopped:
@@ -275,15 +279,14 @@ class SslClient(Client):
 
     def makesocket(self, addr_family):
         sock = socket.socket(addr_family, socket.SOCK_STREAM)
-        return ssl.wrap_socket(
-            sock,
-            ca_certs=self.certfile,
-            ssl_version=3,
-            cert_reqs=2,
-        )
+        context = ssl.create_default_context()
+        if self.certfile:
+            context.load_verify_locations(self.certfile)
+        wrapped_sock = context.wrap_socket(sock, server_hostname=self.host)
+        return wrapped_sock
 
 
-def new(host=None, port=10000, ident=None, secret=None, timeout=3, reconnect=True, sleepwait=20, certfile=None):
-    if certfile:
+def new(host=None, port=10000, ident=None, secret=None, timeout=3, reconnect=True, sleepwait=20, certfile=None, tls=False):
+    if tls:
         return SslClient(host, port, ident, secret, timeout, reconnect, certfile=certfile)
     return Client(host, port, ident, secret, timeout, reconnect)
